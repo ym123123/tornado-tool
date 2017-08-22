@@ -4,7 +4,7 @@ import tornado.gen
 
 @tornado.gen.coroutine 
 def op_zookeeper():
-    zk = MyHandler.get_zookeeper(hosts = '192.168.0.36:2181')
+    zk = MyHandler.get_zookeeper(hosts = '127.0.0.1:2181')
     
     result = yield zk.get_async('/test')
     print(result)
