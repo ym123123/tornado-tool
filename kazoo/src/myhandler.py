@@ -1,33 +1,52 @@
 import threading 
+import tornado.gen
 from tornado.concurrent import Future
 from kazoo.handlers.threading import SequentialThreadingHandler, KazooTimeoutError
 from kazoo.client import KazooClient
-from kazoo import python2atexit
+from kazoo import python2atexit 
+from kazoo.security import Permissions
 
+_NONE = object()
 
-class AsyncResult(Future):
+class AsyncResult(object):
     """A one-time event that stores a value or an exception"""
     def __init__(self, handler, condition_factory, timeout_factory):
-        Future.__init__(self)
         self._handler = handler
-        self._exception = None
+        self._exception = _NONE
         self._condition = condition_factory()
         self._callbacks = []
         self._timeout_factory = timeout_factory
         self.value = None
-
+        self.future = None
+        
     def ready(self):
         """Return true if and only if it holds a value or an
         exception"""
-        return self._exception is not None
+        return self._exception is not _NONE
 
     def successful(self):
         """Return true if and only if it is ready and holds a value"""
         return self._exception is None
-
+    
+    def get_future(self):
+        if self.future == None:
+            self.future = Future()
+            
+            try:
+                result = self.get_nowait()
+            except KazooTimeoutError:
+                result = None
+            
+            if result != None:
+                #如果已经有结果了， 则重新设置
+                tornado.ioloop.IOLoop.instance().add_callback(\
+                lambda future:future.set_result(result), self.future)
+                
+        return self.future
+        
     @property
     def exception(self):
-        if self._exception is not None:
+        if self._exception is not _NONE:
             return self._exception
 
     def set(self, value=None):
@@ -40,7 +59,8 @@ class AsyncResult(Future):
                     lambda: callback(self)
                 )
             self._condition.notify_all()
-            self.set_result(self.value)
+            if self.future:
+                self.future.set_result(value)
 
     def set_exception(self, exception):
         """Store the exception. Wake up the waiters."""
@@ -51,7 +71,9 @@ class AsyncResult(Future):
                     lambda: callback(self)
                 )
             self._condition.notify_all()
-            self.set_exception(self._exception)
+            
+            if self.future:
+                self.future.set_exception(exception)
 
     def get(self, block=True, timeout=None):
         """Return the stored value or raise the exception.
@@ -60,13 +82,13 @@ class AsyncResult(Future):
 
         """
         with self._condition:
-            if self._exception is not None:
+            if self._exception is not _NONE:
                 if self._exception is None:
                     return self.value
                 raise self._exception
             elif block:
                 self._condition.wait(timeout)
-                if self._exception is not None:
+                if self._exception is not _NONE:
                     if self._exception is None:
                         return self.value
                     raise self._exception
@@ -86,7 +108,7 @@ class AsyncResult(Future):
         """Block until the instance is ready."""
         with self._condition:
             self._condition.wait(timeout)
-        return self._exception is not None
+        return self._exception is not _NONE
 
     def rawlink(self, callback):
         """Register a callback to call when a value or an exception is
@@ -124,8 +146,26 @@ class MyHandler(SequentialThreadingHandler):
     def get_zookeeper(hosts='127.0.0.1:2181'):
         if MyHandler.__handler == None:
             handler = MyHandler()
-            MyHandler.__handler = KazooClient(hosts, handler = handler)
+            MyHandler.__handler = KazooClient(hosts = hosts, handler = handler)
             MyHandler.__handler.start(1)
             python2atexit.register(lambda : MyHandler.__handler.stop())
         return MyHandler.__handler
-        
+
+@tornado.gen.coroutine
+def get_child_state_watcher(zk, path):
+    future = Future()
+    def watcher(r):
+        future.set_result(r)
+    yield zk.get_children_async(path, watcher).get_future()
+    result = yield future
+    return result
+
+@tornado.gen.coroutine 
+def get_child_data_watcher(zk, path):
+    future = Future()
+    
+    def watcher(r):
+        future.set_result(r)
+    yield zk.exists_async(path, watcher).get_future()
+    result = yield future
+    return result
