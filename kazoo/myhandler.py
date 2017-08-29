@@ -3,8 +3,6 @@ import tornado.gen
 from tornado.concurrent import Future
 from kazoo.handlers.threading import SequentialThreadingHandler, KazooTimeoutError
 from kazoo.client import KazooClient
-from kazoo import python2atexit 
-from kazoo.security import Permissions
 
 _NONE = object()
 
@@ -29,19 +27,16 @@ class AsyncResult(object):
         return self._exception is None
     
     def get_future(self):
-        if self.future == None:
-            self.future = Future()
-            
-            try:
-                result = self.get_nowait()
-            except KazooTimeoutError:
-                result = None
-            
-            if result != None:
-                #如果已经有结果了， 则重新设置
-                tornado.ioloop.IOLoop.instance().add_callback(\
-                lambda future:future.set_result(result), self.future)
-                
+        self.future = Future() 
+        #异常极端的情况
+        with self._condition:
+            if self._exception is not _NONE:
+                if self._exception is None:
+                    tornado.ioloop.IOLoop.instance().add_callback(\
+                        lambda future:future.set_result(self.value), self.future)
+                else:
+                    tornado.ioloop.IOLoop.instance().add_callback(\
+                        lambda future:future.set_result(self.exception()), self.future)
         return self.future
         
     @property
@@ -60,7 +55,8 @@ class AsyncResult(object):
                 )
             self._condition.notify_all()
             if self.future:
-                self.future.set_result(value)
+                tornado.ioloop.IOLoop.instance().add_callback(\
+                lambda future:future.set_result(value), self.future)
 
     def set_exception(self, exception):
         """Store the exception. Wake up the waiters."""
@@ -73,7 +69,8 @@ class AsyncResult(object):
             self._condition.notify_all()
             
             if self.future:
-                self.future.set_exception(exception)
+                tornado.ioloop.IOLoop.instance().add_callback(\
+                lambda future:future.set_result(exception), self.future)
 
     def get(self, block=True, timeout=None):
         """Return the stored value or raise the exception.
@@ -135,37 +132,68 @@ class AsyncResult(object):
                 self._callbacks.remove(callback)
 
 class MyHandler(SequentialThreadingHandler):
-    __handler = None
-    def __init__(self):
+    
+    def __init__(self, hosts='127.0.0.1:2181'):
         SequentialThreadingHandler.__init__(self)
+        self.handler = KazooClient(hosts = hosts, handler = self)
     
     def async_result(self):
         return AsyncResult(self, threading.Condition,
                                           KazooTimeoutError)
-    @staticmethod
-    def get_zookeeper(hosts='127.0.0.1:2181'):
-        if MyHandler.__handler == None:
-            handler = MyHandler()
-            MyHandler.__handler = KazooClient(hosts = hosts, handler = handler)
-            MyHandler.__handler.start(1)
-            python2atexit.register(lambda : MyHandler.__handler.stop())
-        return MyHandler.__handler
+        
+    #这个函数需要全局初始化，如果你在tornado中调用， 可能造成严重问题
+    @tornado.gen.coroutine
+    def get_zookeeper(self, timeout = 1):
+        self.handler.start_async()
+        count = timeout / 0.05
+        
+        while count:
+            count = count - 1
+            
+            if self.handler.connected:
+                break 
+            yield tornado.gen.sleep(0.05)
+        
+        if not self.handler.connected:
+            self.handler.stop()
+            raise self.handler.handler.timeout_exception("Connection time-out")
+        
+        return self.handler
 
 @tornado.gen.coroutine
-def get_child_state_watcher(zk, path):
+def __get_child_state_watcher(zk, path):
     future = Future()
     def watcher(r):
-        future.set_result(r)
+        tornado.ioloop.IOLoop.instance().add_callback(\
+            lambda future:future.set_result(r), future)
     yield zk.get_children_async(path, watcher).get_future()
     result = yield future
     return result
 
+@tornado.gen.coroutine
+def get_child_state_watcher(zk, path):
+    while True:
+        try:
+            result = yield __get_child_state_watcher(zk, path)
+            return result
+        except:
+            yield tornado.gen.sleep(1)
+
 @tornado.gen.coroutine 
-def get_child_data_watcher(zk, path):
+def __get_child_data_watcher(zk, path):
     future = Future()
     
     def watcher(r):
-        future.set_result(r)
+        tornado.ioloop.IOLoop.instance().add_callback(\
+            lambda future:future.set_result(r), future)
     yield zk.exists_async(path, watcher).get_future()
     result = yield future
     return result
+@tornado.gen.coroutine
+def get_child_data_watcher(zk, path):
+    while True:
+        try:
+            result = yield __get_child_data_watcher(zk, path)
+            return result
+        except:
+            yield tornado.gen.sleep(1)
