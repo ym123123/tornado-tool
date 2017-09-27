@@ -9,7 +9,7 @@ ENVI_VERSION = re.compile('([\d\.]*).*', re.DOTALL)
 ENVI_VERSION_KEY = 'zookeeper.version'
 import socket
 
-class test(object):
+class kaClient(object):
 	def __init__(self, ip = '127.0.0.1', port = 2181, session_timeout = 10):
 		self.ip = ip 
 		self.port = port 
@@ -63,13 +63,13 @@ class test(object):
 	
 	@tornado.gen.coroutine 
 	def client_state(self):
-		return self.client.client_state
+		raise tornado.gen.Return(self.client.client_state)
 	@tornado.gen.coroutine 
 	def client_id(self):
-		return self.client.client_id
+		raise tornado.gen.Return(self.client.client_id)
 	@tornado.gen.coroutine 
 	def connected(self):
-		return self.client.connected
+		raise tornado.gen.Return(self.client.connected)
 	
 	@tornado.gen.coroutine 
 	def set_hosts(self, hosts, randomize_hosts=None):
@@ -157,7 +157,7 @@ class test(object):
 		
 	@tornado.gen.coroutine 
 	def unchroot(self, path):
-		self.client.unchroot(path)
+		raise tornado.gen.Return(self.client.unchroot(path))
 	
 	@tornado.gen.coroutine 
 	def sync(self, path):
